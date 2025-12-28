@@ -2,12 +2,17 @@ import os
 import tempfile
 import numpy as np
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
+import soundfile as sf
+import torch
+import torch.nn.functional as F
 
 from utils.loaders import (
     load_label_encoder,
     load_ml_model,
     load_scaler,
     load_keras_model,
+    load_torch_model,
 )
 from utils.preprocess import (
     get_features_cnn_lstm,
@@ -29,7 +34,7 @@ MODEL_REGISTRY = {
         "get_features": get_features_cnn_lstm,
         "prepare_input": prepare_input_cnn_lstm,
     },
-    "ML (SVM/RF/KNN...)": {
+    "ML (XGBOOST)": {
         "kind": "ml",
         "model_path": os.path.join(ART_DIR, "ml", "model.pkl"),
         "scaler_path": os.path.join(ART_DIR, "ml", "scaler.pkl"),  # nếu không có thì để None
@@ -37,11 +42,11 @@ MODEL_REGISTRY = {
         "prepare_input": prepare_input_ml,
     },
     "CNN": {
-        "kind": "lstm",
-        "model_path": os.path.join(ART_DIR, "lstm", "model.h5"),
-        "scaler_path": os.path.join(ART_DIR, "lstm", "scaler.pkl"),  # nếu không có thì để None
-        "get_features": get_features_lstm,
-        "prepare_input": prepare_input_lstm,
+        "kind": "cnn",
+        "model_path": os.path.join(ART_DIR, "cnn", "model.pth"),
+        "scaler_path": os.path.join(ART_DIR, "cnn", "scaler.pkl"),  # nếu không có thì để None
+        "get_features": get_features_cnn,
+        "prepare_input": prepare_input_cnn,
     },
 }
 
@@ -60,7 +65,9 @@ def load_all():
 
         if kind == "ml":
             model = load_ml_model(model_path)
-        else:
+        elif kind == "cnn":
+            model = load_torch_model(model_path)
+        else:  # cnn_lstm
             model = load_keras_model(model_path)
 
         scaler = None
@@ -86,6 +93,7 @@ def softmax(x: np.ndarray) -> np.ndarray:
 
 
 def predict(model_kind, model, x, le):
+
     if model_kind == "ml":
         if hasattr(model, "predict_proba"):
             probs = model.predict_proba(x)[0]
@@ -96,14 +104,25 @@ def predict(model_kind, model, x, le):
             pred = int(np.ravel(model.predict(x))[0])
             probs = np.zeros(len(le.classes_), dtype=np.float32)
             probs[pred] = 1.0
-    else:
+
+    elif model_kind == "cnn_lstm":
         probs = model.predict(x, verbose=0)[0]
 
+    elif model_kind == "cnn":
+        x_tensor = torch.from_numpy(x.astype(np.float32)).unsqueeze(1)  # (1, 1, T, F)
+        model.eval()
+        with torch.no_grad():
+            outputs = model(x_tensor)           # logits
+            probs = F.softmax(outputs, dim=1)   # xác suất
+            probs = probs[0].detach().cpu().numpy()  # lấy xác suất của sample đầu tiên
+
+    # Lấy nhãn dự đoán chung cho tất cả loại model
     probs = np.asarray(probs, dtype=np.float32)
     idx = int(np.argmax(probs))
     label = le.inverse_transform([idx])[0]
     return label, probs
 
+audio_path = None
 
 st.set_page_config(page_title="SRE/SER Deploy", layout="centered")
 st.title("🎙️ SRE/SER Deploy (Upload audio → chọn model → kết quả)")
@@ -111,42 +130,76 @@ st.title("🎙️ SRE/SER Deploy (Upload audio → chọn model → kết quả)
 le, models_cache = load_all()
 
 model_name = st.selectbox("Chọn model", list(MODEL_REGISTRY.keys()))
-uploaded = st.file_uploader("Upload audio", type=["wav", "mp3", "flac", "ogg", "m4a"])
+import streamlit as st
+import sounddevice as sd
+import numpy as np
+import tempfile
+import os
+from scipy.io.wavfile import write
 
-if uploaded is not None:
-    st.audio(uploaded)
+# --- Khởi tạo session_state cho audio_path ---
+if "audio_path" not in st.session_state:
+    st.session_state.audio_path = None
 
-    suffix = "." + uploaded.name.split(".")[-1]
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded.read())
-        audio_path = tmp.name
+audio_source = st.radio("Chọn nguồn audio", ["Upload file", "Nói trực tiếp (Microphone)"])
 
-    if st.button("Predict"):
+# ------------------ Upload file ------------------
+if audio_source == "Upload file":
+    uploaded = st.file_uploader("Upload audio", type=["wav", "mp3", "flac", "ogg", "m4a"])
+    if uploaded is not None:
+        st.audio(uploaded)
+        suffix = "." + uploaded.name.split(".")[-1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded.read())
+            st.session_state.audio_path = tmp.name
+
+# ------------------ Ghi âm Microphone ------------------
+elif audio_source == "Nói trực tiếp (Microphone)":
+    duration = st.number_input("⏱ Thời gian ghi âm (giây)", min_value=1, max_value=10, value=3)
+    if st.button("🎙️ Ghi âm"):
+        st.info("Đang ghi âm...")
+        fs = 16000  # sample rate
+        recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='float32')
+        sd.wait()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            write(tmp.name, fs, recording)
+            st.session_state.audio_path = tmp.name
+        st.success("✅ Đã ghi âm xong!")
+        st.audio(st.session_state.audio_path)
+
+# ------------------ Predict ------------------
+if st.button("Predict"):
+    if st.session_state.audio_path is None:
+        st.warning("⚠️ Vui lòng upload hoặc ghi âm trước")
+        st.stop()
+
+    try:
+        # Lấy model & hàm
+        pack = models_cache[model_name]
+        model_kind = pack["kind"]
+        model = pack["model"]
+        scaler = pack["scaler"]
+        get_features = pack["get_features"]
+        prepare_input = pack["prepare_input"]
+
+        feats = get_features(st.session_state.audio_path)
+        x = prepare_input(feats, scaler)
+        label, probs = predict(model_kind, model, x, le)
+
+        st.subheader(f"✅ Kết quả: **{label}**")
+        st.write("### Xác suất theo lớp")
+        for c, p in zip(le.classes_, probs):
+            st.write(f"- {c}: {float(p):.4f}")
+        st.write("### Biểu đồ")
+        st.bar_chart(probs)
+
+    except Exception as e:
+        st.error(f"Lỗi: {e}")
+
+    finally:
+        # Xóa file tạm nếu muốn
         try:
-            pack = models_cache[model_name]
-            model_kind = pack["kind"]
-            model = pack["model"]
-            scaler = pack["scaler"]
-            get_features = pack["get_features"]
-            prepare_input = pack["prepare_input"]
-
-            feats = get_features(audio_path)
-            x = prepare_input(feats, scaler)
-
-            label, probs = predict(model_kind, model, x, le)
-
-            st.subheader(f"✅ Kết quả: **{label}**")
-            st.write("### Xác suất theo lớp")
-            for c, p in zip(le.classes_, probs):
-                st.write(f"- {c}: {float(p):.4f}")
-
-            st.write("### Biểu đồ")
-            st.bar_chart(probs)
-
-        except Exception as e:
-            st.error(f"Lỗi: {e}")
-        finally:
-            try:
-                os.remove(audio_path)
-            except Exception:
-                pass
+            os.remove(st.session_state.audio_path)
+        except Exception:
+            pass
+        st.session_state.audio_path = None

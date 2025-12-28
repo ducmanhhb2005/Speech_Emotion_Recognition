@@ -26,27 +26,23 @@ def _mfcc(data, sr, hop_length=512, n_mfcc=20, flatten=True):
 
 
 def get_features_cnn_lstm(path: str):
-    data, sr = librosa.load(path, duration=2.5, offset=0.6)  # sr mặc định 22050
-    frame_length = 2048
-    hop_length = 512
-    n_mfcc = 20
+    """
+    Extract MFCC features exactly like training pipeline
+    Output shape: (30,)
+    """
+    data, sr = librosa.load(path, duration=2.5, offset=0.6)
 
-    feat = np.hstack(
-        (
-            _zcr(data, frame_length, hop_length),
-            _rmse(data, frame_length, hop_length),
-            _mfcc(data, sr, hop_length=hop_length, n_mfcc=n_mfcc, flatten=True),
-        )
-    ).astype(np.float32)
+    # MFCC giống hệt lúc train
+    mfccs = librosa.feature.mfcc(
+        y=data,
+        sr=sr,
+        n_mfcc=30
+    )
 
-    # đảm bảo đúng 2376 (phòng khi file audio khác làm lệch frames)
-    target_len = 2376
-    if feat.shape[0] < target_len:
-        feat = np.pad(feat, (0, target_len - feat.shape[0]))
-    else:
-        feat = feat[:target_len]
+    # Mean theo time axis
+    mfccs_mean = np.mean(mfccs.T, axis=0)  # (30,)
 
-    return feat
+    return mfccs_mean.astype(np.float32)
 
 
 def prepare_input_cnn_lstm(feat_1d: np.ndarray, scaler):
@@ -58,20 +54,34 @@ def prepare_input_cnn_lstm(feat_1d: np.ndarray, scaler):
 
 
 # =========================
-# ML 
+# ML
 # =========================
 def get_features_ml(path: str):
     """
-    TODO: Thay bằng feature ML.
-    Gợi ý: MFCC mean/std, chroma, mel, zcr, rmse...
-    Output nên là vector 1D cố định (D,)
+    MUST match extract_feature_from_raw used in training
+    Output shape: (180,)
     """
-    data, sr = librosa.load(path, sr=16000, mono=True)
-    mfcc = librosa.feature.mfcc(y=data, sr=sr, n_mfcc=40)
-    mean = np.mean(mfcc, axis=1)
-    std = np.std(mfcc, axis=1)
-    feat = np.concatenate([mean, std], axis=0).astype(np.float32)  # (80,)
-    return feat
+    y, sr = librosa.load(path, sr=None, mono=True)
+
+    result = np.array([])
+
+    # --- MFCC (40) ---
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
+    mfccs = np.mean(mfccs, axis=1)
+    result = np.hstack((result, mfccs))
+
+    # --- CHROMA (12) ---
+    stft = np.abs(librosa.stft(y))
+    chroma = librosa.feature.chroma_stft(S=stft, sr=sr)
+    chroma = np.mean(chroma, axis=1)
+    result = np.hstack((result, chroma))
+
+    # --- MEL (128) ---
+    mel = librosa.feature.melspectrogram(y=y, sr=sr)
+    mel = np.mean(mel, axis=1)
+    result = np.hstack((result, mel))
+
+    return result.astype(np.float32)
 
 
 def prepare_input_ml(feat_1d: np.ndarray, scaler):
@@ -84,24 +94,32 @@ def prepare_input_ml(feat_1d: np.ndarray, scaler):
 # =========================
 # CNN
 # =========================
-def get_features_cnn(path: str):
-    """
-    TODO: Thay bằng feature CNN. 
-    """
-    data, sr = librosa.load(path, sr=16000, mono=True, duration=3.0)
-    mfcc = librosa.feature.mfcc(y=data, sr=sr, n_mfcc=40, hop_length=512)  # (F, frames)
+def get_features_cnn(path: str, sr=16000, n_mels=128, max_pad_len=200):
+    data, _ = librosa.load(path, sr=sr, mono=True, duration=3.2)
+    melspec = librosa.feature.melspectrogram(y=data, sr=sr, n_mels=n_mels, n_fft=2048, hop_length=512)
+    log_melspec = librosa.power_to_db(melspec, ref=np.max)
+    log_melspec = (log_melspec - log_melspec.mean()) / (log_melspec.std() + 1e-8)
 
-    # pad/trim frames cố định (ví dụ ~94)
-    target_frames = int(3.0 * 16000 / 512)
-    if mfcc.shape[1] < target_frames:
-        mfcc = np.pad(mfcc, ((0, 0), (0, target_frames - mfcc.shape[1])))
+    # Pad hoặc truncate
+    if log_melspec.shape[1] < max_pad_len:
+        pad_width = max_pad_len - log_melspec.shape[1]
+        log_melspec = np.pad(log_melspec, ((0,0),(0,pad_width)), mode='constant')
     else:
-        mfcc = mfcc[:, :target_frames]
+        log_melspec = log_melspec[:, :max_pad_len]
 
-    # trả (T, F)
-    return mfcc.T.astype(np.float32)
+    return log_melspec.T.astype(np.float32)  # shape (max_pad_len, n_mels)
 
 
-def prepare_input_cnn(feat_2d: np.ndarray, scaler):
-    x = np.expand_dims(feat_2d, axis=0)
+
+def prepare_input_cnn(feat_2d: np.ndarray, scaler=None):
+    """
+    Chuyển MFCC (T, F) thành input CNN dạng (1, T, F) float32.
+    Có thể dùng scaler để chuẩn hóa nếu cần.
+    """
+    x = np.expand_dims(feat_2d, axis=0)  # (1, T, F)
+    if scaler is not None:
+        T, F = x.shape[1], x.shape[2]
+        x_reshaped = x.reshape(-1, F)
+        x_scaled = scaler.transform(x_reshaped)
+        x = x_scaled.reshape(1, T, F)
     return x.astype(np.float32)
