@@ -91,36 +91,48 @@ def softmax(x: np.ndarray) -> np.ndarray:
     exp = np.exp(x)
     return exp / np.sum(exp)
 
+EMOTION_MAP = {
+    0: 'neutral',
+    1: 'happy',
+    2: 'sad',
+    3: 'angry',
+    4: 'fearful',
+    5: 'disgust',
+    6: 'surprised'
+}
 
 def predict(model_kind, model, x, le):
+    """
+    x: torch.Tensor (1, 1, N_MELS, MAX_PAD_LEN)
+    """
 
-    if model_kind == "ml":
-        if hasattr(model, "predict_proba"):
-            probs = model.predict_proba(x)[0]
-        elif hasattr(model, "decision_function"):
-            scores = np.ravel(model.decision_function(x))
-            probs = softmax(scores)
-        else:
-            pred = int(np.ravel(model.predict(x))[0])
-            probs = np.zeros(len(le.classes_), dtype=np.float32)
-            probs[pred] = 1.0
+    if model_kind == "cnn":
+     model.eval()
+     with torch.no_grad():
+      outputs = model(x)                 # (1, num_classes)
+      probs = torch.softmax(outputs, dim=1)[0]  # (num_classes,)
+
+      probs = probs.cpu().numpy()
+
+      idx = int(np.argmax(probs))            # emotion id
+      label = EMOTION_MAP[idx]               # emotion name
+      confidence = float(probs[idx])         # xác suất của label
+
+      return label, probs
+
+
+    elif model_kind == "ml":
+        probs = model.predict_proba(x)[0]
 
     elif model_kind == "cnn_lstm":
         probs = model.predict(x, verbose=0)[0]
 
-    elif model_kind == "cnn":
-        x_tensor = torch.from_numpy(x.astype(np.float32)).unsqueeze(1)  # (1, 1, T, F)
-        model.eval()
-        with torch.no_grad():
-            outputs = model(x_tensor)           # logits
-            probs = F.softmax(outputs, dim=1)   # xác suất
-            probs = probs[0].detach().cpu().numpy()  # lấy xác suất của sample đầu tiên
-
-    # Lấy nhãn dự đoán chung cho tất cả loại model
     probs = np.asarray(probs, dtype=np.float32)
     idx = int(np.argmax(probs))
     label = le.inverse_transform([idx])[0]
+
     return label, probs
+
 
 audio_path = None
 
