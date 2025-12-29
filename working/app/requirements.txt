@@ -1,0 +1,9 @@
+streamlit
+numpy
+librosa
+soundfile
+scikit-learn
+joblib
+tensorflow
+streamlit-audiorecorder
+torch
