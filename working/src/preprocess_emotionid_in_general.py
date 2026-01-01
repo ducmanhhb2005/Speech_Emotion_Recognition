@@ -119,5 +119,5 @@ val_df.to_csv(os.path.join(OUTPUT_DIR, "val_final.csv"), index=False)
 test_df.to_csv(os.path.join(OUTPUT_DIR, "test_final.csv"), index=False)
 
 print(f"Số file train: {len(train_df)}, val: {len(val_df)}, test: {len(test_df)}")
-print("✅ Hoàn tất preprocess, CSV sẵn sàng train mô hình")
+print("Hoàn tất preprocess, CSV sẵn sàng train mô hình")
 print("Bảng label -> label_id:", dict(zip(EMOTION_MAP.values(), EMOTION_ID_TO_NUM.values())))
