@@ -77,7 +77,8 @@ def load_label_encoder(path: str):
 
 
 def load_ml_model(path: str):
-    return joblib.load(path)
+    obj = joblib.load(path)
+    return obj["svm"]
 
 
 def load_scaler(path: str):
