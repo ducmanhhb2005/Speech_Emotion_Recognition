@@ -55,7 +55,7 @@ EMOTION_MAP = {
 
 LSTM_MAP = {
     0:'Angry', 1:'Disgust', 2:'Fear', 3:'Happy',
-    4:'Neutral', 5:'Fear', 6:'Sad', 7:'Surprise'
+    4:'Neutral', 5:'Sad', 6:'Surprise'
 }
 
 # ================= LOAD MODELS =================
