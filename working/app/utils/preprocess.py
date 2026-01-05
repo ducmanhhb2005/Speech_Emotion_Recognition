@@ -2,6 +2,7 @@ import numpy as np
 import librosa
 import torch
 import os
+import pickle
 # =========================
 # CNN-LSTM
 # duration=2.5, offset=0.6, sr=22050 (mặc định), hop=512, frame_length=2048
@@ -93,10 +94,7 @@ def get_features_cnn_lstm(path: str):
 
     return result.astype(np.float32)   # (162,)
 def prepare_input_cnn_lstm(feat_1d: np.ndarray, scaler):
-    """
-    Input: (162,)
-    Output: (1, 162, 1)
-    """
+
     x = feat_1d.reshape(1, -1)   # (1, 162)
 
     if scaler is not None:
@@ -110,39 +108,64 @@ def prepare_input_cnn_lstm(feat_1d: np.ndarray, scaler):
 # =========================
 # ML
 # =========================
+ML_MODEL_PATH = "artifacts/ml/model.pkl"  # svm_model.pkl của m
+
 def get_features_ml(path: str):
     """
-    MUST match extract_feature_from_raw used in training
-    Output shape: (180,)
+    Extract + scale feature cho SVM
+    Output: (1, 162)
     """
-    y, sr = librosa.load(path, sr=None, mono=True)
 
-    result = np.array([])
+    # ===== Load audio =====
+    y, sr = librosa.load(path, sr=None)
+    if y.ndim > 1:
+        y = librosa.to_mono(y)
 
-    # --- MFCC (40) ---
-    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
-    mfccs = np.mean(mfccs, axis=1)
-    result = np.hstack((result, mfccs))
+    y = librosa.resample(y, orig_sr=sr, target_sr=16000)
+    sr = 16000
 
-    # --- CHROMA (12) ---
-    stft = np.abs(librosa.stft(y))
-    chroma = librosa.feature.chroma_stft(S=stft, sr=sr)
-    chroma = np.mean(chroma, axis=1)
-    result = np.hstack((result, chroma))
+    if len(y) < sr:
+        raise ValueError("Audio quá ngắn")
 
-    # --- MEL (128) ---
-    mel = librosa.feature.melspectrogram(y=y, sr=sr)
-    mel = np.mean(mel, axis=1)
-    result = np.hstack((result, mel))
+    # ===== Feature giống lúc train =====
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
+    delta = librosa.feature.delta(mfcc)
+    delta2 = librosa.feature.delta(mfcc, order=2)
+    rms = librosa.feature.rms(y=y)
 
-    return result.astype(np.float32)
+    feat = np.hstack([
+        mfcc.mean(axis=1),
+        mfcc.std(axis=1),
+        delta.mean(axis=1),
+        delta2.mean(axis=1),
+        rms.mean(),
+        rms.std()
+    ]).astype(np.float32)
+
+    feat = feat.reshape(1, -1)   # (1, 162)
+
+    # ===== LOAD SCALER TỪ FILE SVM =====
+    with open(ML_MODEL_PATH, "rb") as f:
+        pack = pickle.load(f)
+
+    scaler = pack["scaler"]
+    feat = scaler.transform(feat)
+
+    return feat
+
 
 
 def prepare_input_ml(feat_1d: np.ndarray, scaler):
-    x = feat_1d.reshape(1, -1)
+    """
+    Chuẩn bị input cho SVM
+    """
+    x = feat_1d.reshape(1, -1)  # (1, num_features)
+
     if scaler is not None:
         x = scaler.transform(x)
+
     return x.astype(np.float32)
+
 
 
 # =========================
